@@ -486,8 +486,9 @@
                 "assemblers": {
                     "type": "string",
                     "default": "spades",
-                    "description": "Specify which assembly algorithms you would like to use. Available options are 'spades', 'unicycler' and 'minia'.",
-                    "fa_icon": "fas fa-random"
+                    "description": "Specify which assembly algorithms you would like to use. Available options for Illumina are 'spades', 'unicycler' and 'minia'. For Nanopore, 'dragonflye' is currently supported.",
+                    "fa_icon": "fas fa-random",
+                    "enum": ["spades", "unicycler", "minia", "dragonflye"]
                 },
                 "spades_mode": {
                     "type": "string",
@@ -554,6 +555,12 @@
                     "type": "boolean",
                     "fa_icon": "fas fa-fast-forward",
                     "description": "Specify this parameter to skip all of the de novo assembly steps in the pipeline."
+                },
+                "assembly_args": {
+                    "type": "string",
+                    "fa_icon": "fas fa-cog",
+                    "description": "Additional arguments passed to the assembler (e.g. '--minreadlen 500'). For Nanopore, the assembler is selected via --assemblers (currently only 'dragonflye' is supported).",
+                    "help_text": "Arguments are appended directly to the assembler command. For Dragonflye see https://github.com/rpetit3/dragonflye for available options."
                 },
                 "min_contig_length": {
                     "type": "integer",
