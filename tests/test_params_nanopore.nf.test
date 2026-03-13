@@ -38,6 +38,12 @@ nextflow_pipeline {
                 sequencing_summary: false,
                 fast5_dir: false
             ]
+        ],
+        [
+            name: "-profile test_nanopore --assemblers 'dragonflye'",
+            params: [
+                assemblers: 'dragonflye'
+            ]
         ]
     ]
 
