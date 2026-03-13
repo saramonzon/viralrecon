@@ -37,8 +37,10 @@ if (params.platform == 'illumina') {
         params.freyja_barcodes, params.freyja_lineages_meta, params.freyja_lineages_topology, params.additional_annotation
     ]
 } else if (params.platform == 'nanopore') {
+    // params.fastq_dir is optional when a samplesheet with a 'fastq' column is provided
     checkPathParamList = [
-        params.input, params.fastq_dir,
+        params.input,
+        params.fastq_dir,
         params.sequencing_summary, params.gff,
         params.freyja_barcodes, params.freyja_lineages_meta, params.freyja_lineages_topology, params.additional_annotation,
         params.kraken2_db
@@ -231,13 +233,13 @@ workflow VIRALRECON {
             PREPARE_GENOME
                 .out
                 .primer_bed
-                .map { [ getColFromFile(it, col=0, uniqify=true, sep='\t') ] }
+                .map { getColFromFile(it, col=0, uniqify=true, sep='\t') }
                 .set { ch_bed_contigs }
 
             PREPARE_GENOME
                 .out
                 .fai
-                .map { [ getColFromFile(it, col=0, uniqify=true, sep='\t') ] }
+                .map { getColFromFile(it, col=0, uniqify=true, sep='\t') }
                 .concat(ch_bed_contigs)
                 .collect()
                 .map { fai, bed -> checkContigsInBED(fai, bed, log) }
@@ -546,6 +548,8 @@ workflow VIRALRECON {
         //
         ch_nextclade_report = channel.empty()
         ch_pangolin_report  = channel.empty()
+        ch_pangolin_multiqc = channel.empty()
+        ch_pango_database   = channel.empty()
         ch_consensus_genome = channel.empty()
 
         if (!params.skip_variants && !params.skip_consensus && params.consensus_caller == 'ivar') {
@@ -763,155 +767,195 @@ workflow VIRALRECON {
             ch_versions       = ch_versions.mix(PYCOQC.out.versions)
         }
 
-        // Check primer BED file only contains suffixes provided --primer_left_suffix / --primer_right_suffix
-        PREPARE_GENOME
-            .out
-            .primer_bed
-            .map { checkPrimerSuffixes(it, params.primer_left_suffix, params.primer_right_suffix, log) }
+        if (params.protocol == 'amplicon') {
+            // Check primer BED file only contains suffixes provided --primer_left_suffix / --primer_right_suffix
+            PREPARE_GENOME
+                .out
+                .primer_bed
+                .map { checkPrimerSuffixes(it, params.primer_left_suffix, params.primer_right_suffix, log) }
 
-        // Check whether the contigs in the primer BED file are present in the reference genome
-        PREPARE_GENOME
-            .out
-            .primer_bed
-            .map { [ getColFromFile(it, col=0, uniqify=true, sep='\t') ] }
-            .set { ch_bed_contigs }
+            // Check whether the contigs in the primer BED file are present in the reference genome
+            PREPARE_GENOME
+                .out
+                .primer_bed
+                .map { getColFromFile(it, col=0, uniqify=true, sep='\t') }
+                .set { ch_bed_contigs }
 
-        PREPARE_GENOME
-            .out
-            .fai
-            .map { [ getColFromFile(it, col=0, uniqify=true, sep='\t') ] }
-            .concat(ch_bed_contigs)
-            .collect()
-            .map { fai, bed -> checkContigsInBED(fai, bed, log) }
-
-        barcode_dirs       = file("${params.fastq_dir}/barcode*", type: 'dir' , maxdepth: 1)
-        single_barcode_dir = file("${params.fastq_dir}/*.fastq" , type: 'file', maxdepth: 1)
-        if (barcode_dirs) {
-            channel
-                .fromPath( barcode_dirs )
-                .filter( ~/.*barcode[0-9]{1,4}$/ )
-                .map { dir ->
-                    def count = 0
-                    for (x in dir.listFiles()) {
-                        if (x.isFile() && x.toString().contains('.fastq')) {
-                            count += x.countFastq()
-                        }
-                    }
-                    return [ dir.baseName , dir, count ]
-                }
-                .set { ch_fastq_dirs }
-
-            //
-            // SUBWORKFLOW: Read in samplesheet containing sample to barcode mappings
-            //
-            if (params.input) {
-                ch_samplesheet
-                .join(ch_fastq_dirs, remainder: true)
-                .set { ch_fastq_dirs }
-
-                //
-                // MODULE: Create custom content file for MultiQC to report barcodes were allocated reads >= params.min_barcode_reads but no sample name in samplesheet
-                //
-                ch_fastq_dirs
-                    .filter { it[1] == null }
-                    .filter { it[-1] >= params.min_barcode_reads }
-                    .map { it -> [ "${it[0]}\t${it[-1]}" ] }
-                    .collect()
-                    .map {
-                        tsv_data ->
-                            def header = ['Barcode', 'Read count']
-                            multiqcTsvFromList(tsv_data, header)
-                    }
-                    .collectFile(name: 'fail_barcodes_no_sample_mqc.tsv')
-                    .ifEmpty([])
-                    .set { ch_custom_no_sample_name_multiqc }
-
-                ch_multiqc_files = ch_multiqc_files.mix ( ch_custom_no_sample_name_multiqc )
-                //
-                // MODULE: Create custom content file for MultiQC to report samples that were in samplesheet but have no barcodes
-                //
-                ch_fastq_dirs
-                    .filter { it[-1] == null }
-                    .map { it -> [ "${it[1]}\t${it[0]}" ] }
-                    .collect()
-                    .map {
-                        tsv_data ->
-                            def header = ['Sample', 'Missing barcode']
-                            multiqcTsvFromList(tsv_data, header)
-                    }
-                    .collectFile(name: 'fail_no_barcode_samples_mqc.tsv')
-                    .ifEmpty([])
-                    .set { ch_custom_no_barcodes_multiqc }
-
-                ch_multiqc_files = ch_multiqc_files.mix ( ch_custom_no_barcodes_multiqc )
-
-                ch_fastq_dirs
-                    .filter { (it[1] != null)  }
-                    .filter { (it[-1] != null) }
-                    .set { ch_fastq_dirs }
-
-            } else {
-                ch_fastq_dirs
-                    .map { barcode, dir, count -> [ barcode, barcode, dir, count ] }
-                    .set { ch_fastq_dirs }
-            }
-        } else if (single_barcode_dir) {
-            channel
-                .fromPath("${params.fastq_dir}", type: 'dir', maxDepth: 1)
-                .map { it -> [ 'SAMPLE_1', 'single_barcode', it, 10000000 ] }
-                .set{ ch_fastq_dirs }
-        } else {
-            error "Please specify a valid folder containing ONT basecalled, barcoded fastq files generated by guppy_barcoder or guppy_basecaller e.g. '--fastq_dir ./20191023_1522_MC-110615_0_FAO93606_12bf9b4f/fastq_pass/"
+            PREPARE_GENOME
+                .out
+                .fai
+                .map { getColFromFile(it, col=0, uniqify=true, sep='\t') }
+                .concat(ch_bed_contigs)
+                .collect()
+                .map { fai, bed -> checkContigsInBED(fai, bed, log) }
         }
 
         //
-        // MODULE: Create custom content file for MultiQC to report samples with reads < params.min_barcode_reads
+        // Branch samplesheet channel into fastq_mode (direct FASTQs) vs barcode_mode (fastq_dir)
         //
-        ch_fastq_dirs
-            .branch { barcode, sample, dir, count  ->
-                pass: count > params.min_barcode_reads
-                    pass_barcode_reads[sample] = count
-                    return [ "$sample\t$count" ]
-                fail: count < params.min_barcode_reads
-                    fail_barcode_reads[sample] = count
-                    return [ "$sample\t$count" ]
+        ch_samplesheet
+            .branch { mode, a, b ->
+                fastq:   mode == 'fastq_mode'
+                barcode: mode == 'barcode_mode'
             }
-            .set { ch_pass_fail_barcode_count }
+            .set { ch_nanopore_input }
 
-        ch_pass_fail_barcode_count
-            .fail
-            .collect()
-            .map {
-                tsv_data ->
+        //
+        // FASTQ SAMPLESHEET MODE: samples provided with direct FASTQ paths, skip ARTIC_GUPPYPLEX
+        //
+        ch_nanopore_input
+            .fastq
+            .map { mode, meta, fastq -> [ meta + [ single_end: true ], fastq ] }
+            .set { ch_fastq_from_samplesheet }
+
+        //
+        // BARCODE / FASTQ_DIR MODE: legacy mode using fastq_pass folder + barcode subdirs
+        //
+        if (params.fastq_dir) {
+            def barcode_dirs       = file("${params.fastq_dir}/barcode*", type: 'dir' , maxdepth: 1)
+            def single_barcode_dir = file("${params.fastq_dir}/*.fastq" , type: 'file', maxdepth: 1)
+            if (barcode_dirs) {
+                channel
+                    .fromPath( barcode_dirs )
+                    .filter( ~/.*barcode[0-9]{1,4}$/ )
+                    .map { dir ->
+                        def count = 0
+                        for (x in dir.listFiles()) {
+                            if (x.isFile() && x.toString().contains('.fastq')) {
+                                count += x.countFastq()
+                            }
+                        }
+                        return [ dir.baseName , dir, count ]
+                    }
+                    .set { ch_fastq_dirs }
+
+                //
+                // SUBWORKFLOW: Read in samplesheet containing sample to barcode mappings
+                //
+                ch_nanopore_input
+                    .barcode
+                    .map { mode, barcode_key, sample_id -> [ barcode_key, sample_id ] }
+                    .set { ch_barcode_samplesheet }
+
+                if (params.input) {
+                    ch_barcode_samplesheet
+                    .join(ch_fastq_dirs, remainder: true)
+                    .set { ch_fastq_dirs }
+
+                    //
+                    // MODULE: Create custom content file for MultiQC to report barcodes were allocated reads >= params.min_barcode_reads but no sample name in samplesheet
+                    //
+                    ch_fastq_dirs
+                        .filter { it[1] == null }
+                        .filter { it[-1] >= params.min_barcode_reads }
+                        .map { it -> [ "${it[0]}\t${it[-1]}" ] }
+                        .collect()
+                        .map { tsv_data ->
+                            def header = ['Barcode', 'Read count']
+                            multiqcTsvFromList(tsv_data, header)
+                        }
+                        .collectFile(name: 'fail_barcodes_no_sample_mqc.tsv')
+                        .ifEmpty([])
+                        .set { ch_custom_no_sample_name_multiqc }
+
+                    ch_multiqc_files = ch_multiqc_files.mix(ch_custom_no_sample_name_multiqc)
+
+                    //
+                    // MODULE: Create custom content file for MultiQC to report samples that were in samplesheet but have no barcodes
+                    //
+                    ch_fastq_dirs
+                        .filter { it[-1] == null }
+                        .map { it -> [ "${it[1]}\t${it[0]}" ] }
+                        .collect()
+                        .map { tsv_data ->
+                            def header = ['Sample', 'Missing barcode']
+                            multiqcTsvFromList(tsv_data, header)
+                        }
+                        .collectFile(name: 'fail_no_barcode_samples_mqc.tsv')
+                        .ifEmpty([])
+                        .set { ch_custom_no_barcodes_multiqc }
+
+                    ch_multiqc_files = ch_multiqc_files.mix(ch_custom_no_barcodes_multiqc)
+
+                    ch_fastq_dirs
+                        .filter { (it[1] != null) }
+                        .filter { (it[-1] != null) }
+                        .set { ch_fastq_dirs }
+
+                } else {
+                    ch_fastq_dirs
+                        .map { barcode, dir, count -> [ barcode, barcode, dir, count ] }
+                        .set { ch_fastq_dirs }
+                }
+            } else if (single_barcode_dir) {
+                channel
+                    .fromPath("${params.fastq_dir}", type: 'dir', maxDepth: 1)
+                    .map { it -> [ 'SAMPLE_1', 'single_barcode', it, 10000000 ] }
+                    .set { ch_fastq_dirs }
+            } else {
+                error "Please specify a valid folder containing ONT basecalled, barcoded fastq files generated by guppy_barcoder or guppy_basecaller e.g. '--fastq_dir ./20191023_1522_MC-110615_0_FAO93606_12bf9b4f/fastq_pass/'"
+            }
+
+            //
+            // MODULE: Create custom content file for MultiQC to report samples with reads < params.min_barcode_reads
+            //
+            ch_fastq_dirs
+                .branch { barcode, sample, dir, count ->
+                    pass: count > params.min_barcode_reads
+                        pass_barcode_reads[sample] = count
+                        return [ "$sample\t$count" ]
+                    fail: count < params.min_barcode_reads
+                        fail_barcode_reads[sample] = count
+                        return [ "$sample\t$count" ]
+                }
+                .set { ch_pass_fail_barcode_count }
+
+            ch_pass_fail_barcode_count
+                .fail
+                .collect()
+                .map { tsv_data ->
                     def header = ['Sample', 'Barcode count']
                     multiqcTsvFromList(tsv_data, header)
-            }
-            .collectFile(name: 'fail_barcode_count_samples_mqc.tsv')
-            .ifEmpty([])
-            .set { ch_custom_fail_barcodes_count_multiqc }
+                }
+                .collectFile(name: 'fail_barcode_count_samples_mqc.tsv')
+                .ifEmpty([])
+                .set { ch_custom_fail_barcodes_count_multiqc }
 
-        ch_multiqc_files = ch_multiqc_files.mix(ch_custom_fail_barcodes_count_multiqc)
+            ch_multiqc_files = ch_multiqc_files.mix(ch_custom_fail_barcodes_count_multiqc)
 
-        // Re-arrange channels to have meta map of information for sample
-        ch_fastq_dirs
-            .filter { it[-1] > params.min_barcode_reads }
-            .map { barcode, sample, dir, count -> [ [ id: sample, barcode:barcode ], dir ] }
-            .set { ch_fastq_dirs }
-
-        //
-        // MODULE: Run Artic Guppyplex
-        //
-        ARTIC_GUPPYPLEX (
+            // Re-arrange channels to have meta map of information for sample
             ch_fastq_dirs
-        )
-        ch_versions = ch_versions.mix(ARTIC_GUPPYPLEX.out.versions.first())
+                .filter { it[-1] > params.min_barcode_reads }
+                .map { barcode, sample, dir, count -> [ [ id: sample, barcode: barcode ], dir ] }
+                .set { ch_fastq_dirs }
+
+            //
+            // MODULE: Run Artic Guppyplex
+            //
+            ARTIC_GUPPYPLEX (
+                ch_fastq_dirs
+            )
+            ch_versions = ch_versions.mix(ARTIC_GUPPYPLEX.out.versions.first())
+
+            // Combine guppyplex output with direct-fastq channel
+            ch_fastq_from_samplesheet
+                .mix(ARTIC_GUPPYPLEX.out.fastq)
+                .set { ch_nanopore_fastq }
+
+        } else if (!params.fastq_dir) {
+            // Pure samplesheet-with-fastqs mode (no --fastq_dir provided)
+            if (ch_fastq_from_samplesheet.ifEmpty(null) == null) {
+                error "Please provide either '--fastq_dir' or a samplesheet with a 'fastq' column when using '--platform nanopore'."
+            }
+            ch_fastq_from_samplesheet
+                .set { ch_nanopore_fastq }
+        }
 
         //
         // MODULE: Run Kraken2 for removal of host reads
         //
-        ch_variants_fastq = ARTIC_GUPPYPLEX.out.fastq.map { meta, fastq ->
-                    meta += [single_end: true]
-                    return [meta, fastq]
+        ch_variants_fastq = ch_nanopore_fastq.map { meta, fastq ->
+                    return [ meta + [ single_end: true ], fastq ]
                 }
         ch_assembly_fastq  = ch_variants_fastq
         if (!params.skip_kraken2) {
@@ -936,9 +980,7 @@ workflow VIRALRECON {
         //
         // MODULE: Create custom content file for MultiQC to report samples with reads < params.min_guppyplex_reads
         //
-        ARTIC_GUPPYPLEX
-            .out
-            .fastq
+        ch_nanopore_fastq
             .branch { meta, fastq  ->
                 def count = fastq.countFastq()
                 pass: count > params.min_guppyplex_reads
@@ -951,10 +993,9 @@ workflow VIRALRECON {
         ch_pass_fail_guppyplex_count
             .fail
             .collect()
-            .map {
-                tsv_data ->
-                    def header = ['Sample', 'Read count']
-                    multiqcTsvFromList(tsv_data, header)
+            .map { tsv_data ->
+                def header = ['Sample', 'Read count']
+                multiqcTsvFromList(tsv_data, header)
             }
             .collectFile(name: 'fail_guppyplex_count_samples_mqc.tsv')
             .ifEmpty([])
@@ -967,7 +1008,7 @@ workflow VIRALRECON {
         //
         if (!params.skip_nanoplot) {
             NANOPLOT (
-                ARTIC_GUPPYPLEX.out.fastq
+                ch_nanopore_fastq
             )
             ch_versions = ch_versions.mix(NANOPLOT.out.versions.first())
         }
@@ -975,11 +1016,12 @@ workflow VIRALRECON {
         //
         // MODULE: Run Artic minion
         //
+        if (!params.skip_variants) {
 
         ARTIC_MINION (
-            ARTIC_GUPPYPLEX.out.fastq.filter { it[-1].countFastq() > params.min_guppyplex_reads },
+            ch_nanopore_fastq.filter { meta, fastq -> fastq.countFastq() > params.min_guppyplex_reads },
             ch_artic_model_dir,
-            params.artic_minion_model,
+            channel.value( params.artic_minion_model ?: [] ),
             PREPARE_GENOME.out.fasta,
             PREPARE_GENOME.out.primer_bed
         )
@@ -1123,10 +1165,6 @@ workflow VIRALRECON {
         //
         // MODULE: Lineage analysis with Pangolin
         //
-        ch_pango_database = channel.empty()
-        ch_pangolin_report = channel.empty()
-        ch_pangolin_multiqc = channel.empty()
-
         if (!params.skip_pangolin) {
             if (!params.pango_database) {
                 PANGOLIN_UPDATEDATA('pangolin_db')
@@ -1220,6 +1258,8 @@ workflow VIRALRECON {
             ch_versions      = ch_versions.mix(QUAST.out.versions)
         }
 
+        } // end if (!params.skip_variants)
+
         //
         // SUBWORKFLOW: De novo assembly with Dragonflye + host removal (Kraken2) + QC (QUAST)
         //
@@ -1234,63 +1274,64 @@ workflow VIRALRECON {
             ch_versions      = ch_versions.mix(ASSEMBLY_DRAGONFLYE.out.versions)
         }
 
-        //
-        // SUBWORKFLOW: Annotate variants with snpEff
-        //
-        ch_snpsift_txt    = channel.empty()
-        if (ch_genome_gff && !params.skip_snpeff) {
-            SNPEFF_SNPSIFT (
-                VCFLIB_VCFUNIQ.out.vcf,
-                PREPARE_GENOME.out.snpeff_db.collect(),
-                PREPARE_GENOME.out.snpeff_config.collect(),
-                PREPARE_GENOME.out.fasta.collect()
-            )
-            ch_multiqc_files  = ch_multiqc_files.mix(SNPEFF_SNPSIFT.out.csv.collect{it[1]}.ifEmpty([]))
-            ch_snpsift_txt    = SNPEFF_SNPSIFT.out.snpsift_txt
-            ch_versions       = ch_versions.mix(SNPEFF_SNPSIFT.out.versions)
-        }
-
-        //
-        // SUBWORKFLOW: Create variants long table report
-        //
-        if (!params.skip_variants_long_table && ch_genome_gff && !params.skip_snpeff) {
-            VARIANTS_LONG_TABLE (
-                VCFLIB_VCFUNIQ.out.vcf,
-                TABIX_TABIX.out.tbi,
-                ch_snpsift_txt,
-                ch_pangolin_multiqc
-            )
-            ch_versions = ch_versions.mix(VARIANTS_LONG_TABLE.out.versions)
-        }
-
-        //
-        // SUBWORKFLOW: Create variants long table report for additional annotation file
-        //
-        if (params.additional_annotation) {
-            ch_annot = channel.empty()
+        if (!params.skip_variants) {
             //
-            // Uncompress additional annotation file
+            // SUBWORKFLOW: Annotate variants with snpEff
             //
-            if (params.additional_annotation.endsWith('.gz')) {
-                GUNZIP_GFF (
-                    [ [:], ch_additional_gtf ]
+            ch_snpsift_txt    = channel.empty()
+            if (ch_genome_gff && !params.skip_snpeff) {
+                SNPEFF_SNPSIFT (
+                    VCFLIB_VCFUNIQ.out.vcf,
+                    PREPARE_GENOME.out.snpeff_db.collect(),
+                    PREPARE_GENOME.out.snpeff_config.collect(),
+                    PREPARE_GENOME.out.fasta.collect()
                 )
-                ch_annot       = GUNZIP_GFF.out.gunzip.map { it[1] }
-                ch_versions = ch_versions.mix(GUNZIP_GFF.out.versions)
-            } else {
-                ch_annot = ch_additional_gtf
+                ch_multiqc_files  = ch_multiqc_files.mix(SNPEFF_SNPSIFT.out.csv.collect{it[1]}.ifEmpty([]))
+                ch_snpsift_txt    = SNPEFF_SNPSIFT.out.snpsift_txt
+                ch_versions       = ch_versions.mix(SNPEFF_SNPSIFT.out.versions)
             }
 
-            ADDITIONAL_ANNOTATION (
-                VCFLIB_VCFUNIQ.out.vcf,
-                TABIX_TABIX.out.tbi,
-                PREPARE_GENOME.out.fasta,
-                ch_annot,
-                ch_pangolin_multiqc
+            //
+            // SUBWORKFLOW: Create variants long table report
+            //
+            if (!params.skip_variants_long_table && ch_genome_gff && !params.skip_snpeff) {
+                VARIANTS_LONG_TABLE (
+                    VCFLIB_VCFUNIQ.out.vcf,
+                    TABIX_TABIX.out.tbi,
+                    ch_snpsift_txt,
+                    ch_pangolin_multiqc
+                )
+                ch_versions = ch_versions.mix(VARIANTS_LONG_TABLE.out.versions)
+            }
 
-            )
-            ch_versions = ch_versions.mix(ADDITIONAL_ANNOTATION.out.versions)
-        }
+            //
+            // SUBWORKFLOW: Create variants long table report for additional annotation file
+            //
+            if (params.additional_annotation) {
+                ch_annot = channel.empty()
+                //
+                // Uncompress additional annotation file
+                //
+                if (params.additional_annotation.endsWith('.gz')) {
+                    GUNZIP_GFF (
+                        [ [:], ch_additional_gtf ]
+                    )
+                    ch_annot       = GUNZIP_GFF.out.gunzip.map { it[1] }
+                    ch_versions = ch_versions.mix(GUNZIP_GFF.out.versions)
+                } else {
+                    ch_annot = ch_additional_gtf
+                }
+
+                ADDITIONAL_ANNOTATION (
+                    VCFLIB_VCFUNIQ.out.vcf,
+                    TABIX_TABIX.out.tbi,
+                    PREPARE_GENOME.out.fasta,
+                    ch_annot,
+                    ch_pangolin_multiqc
+                )
+                ch_versions = ch_versions.mix(ADDITIONAL_ANNOTATION.out.versions)
+            }
+        } // end if (!params.skip_variants) -- snpeff/long_table/additional_annotation
     }
 
     //
