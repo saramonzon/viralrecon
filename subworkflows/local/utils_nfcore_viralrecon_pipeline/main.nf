@@ -122,9 +122,14 @@ workflow PIPELINE_INITIALISATION {
         if (input){
             channel
                 .fromList(samplesheetToList(params.input, "${projectDir}/assets/schema_input.json"))
-                .map {
-                    meta, fastq_1, fastq_2, barcode->
-                        tuple( "barcode"+ String.format('%02d', barcode).toString(), meta.id)
+                .map { meta, fastq_1, fastq_2, barcode, fastq ->
+                    if (fastq) {
+                        // Samplesheet-with-fastqs mode: emit [meta, fastq] directly
+                        return [ 'fastq_mode', meta, fastq ]
+                    } else {
+                        // Legacy barcode/fastq_dir mode: emit [barcode_key, sample_id]
+                        return [ 'barcode_mode', "barcode" + String.format('%02d', barcode).toString(), meta.id ]
+                    }
                 }
                 .set { ch_samplesheet }
         }

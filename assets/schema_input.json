@@ -30,6 +30,13 @@
             "barcode": {
                 "type": "integer",
                 "errorMessage": "Barcode must be provided and must be an integer"
+            },
+            "fastq": {
+                "type": "string",
+                "format": "file-path",
+                "exists": true,
+                "pattern": "^([\\S\\s]*\\/)?[^\\s\\/]+\\.f(ast)?q(\\.gz)?$",
+                "errorMessage": "FastQ file for Nanopore reads cannot contain spaces and must have extension '.fq', '.fastq', '.fq.gz' or '.fastq.gz'"
             }
         },
         "required": ["sample"]
