@@ -1,0 +1,172 @@
+nextflow_workflow {
+
+    name "Test Subworkflow ASSEMBLY_DRAGONFLYE"
+    script "../main.nf"
+    workflow "ASSEMBLY_DRAGONFLYE"
+
+    tag "subworkflows"
+    tag "subworkflows_local"
+    tag "assembly_dragonflye"
+
+    // Reusable test data references
+    def NANOPORE_FASTQ = 'https://raw.githubusercontent.com/nf-core/test-datasets/bacass/nanopore/subset15000.fq.gz'
+    def KRAKEN2_DB     = 'https://raw.githubusercontent.com/nf-core/test-datasets/refs/heads/viralrecon/genome/kraken2/kraken2_hs22.tar.gz'
+    def GENOME_FASTA   = 'https://raw.githubusercontent.com/nf-core/test-datasets/refs/heads/viralrecon/genome/MN908947.3/GCA_009858895.3_ASM985889v3_genomic.200409.fasta.gz'
+
+    // -------------------------------------------------------------------------
+    // Test 1 — basic run: Kraken2 host removal → Dragonflye → QUAST
+    // -------------------------------------------------------------------------
+    test("sarscov2 nanopore - with kraken2 and quast") {
+
+        when {
+            params {
+                skip_kraken2        = false
+                skip_assembly_quast = false
+                skip_assembly       = false
+                assembly_args       = '--assembler miniasm --gsize 30000'
+            }
+            workflow {
+                """
+                input[0] = Channel.of([
+                    [ id:'test_sample', single_end:true ],
+                    file('${NANOPORE_FASTQ}', checkIfExists: true)
+                ])
+                input[1] = file('${KRAKEN2_DB}', checkIfExists: true)
+                input[2] = file('${GENOME_FASTA}', checkIfExists: true)
+                input[3] = Channel.of([ [:], [] ])
+                """
+            }
+        }
+
+        then {
+            assert workflow.success
+
+            // Versions emitted
+            assert workflow.out.versions
+
+            // Contigs produced for each sample
+            assert workflow.out.contigs
+            workflow.out.contigs.each { meta, fa ->
+                assert file(fa).exists()
+            }
+
+            // QUAST results directory present
+            assert workflow.out.quast_results
+
+            assert snapshot(
+                workflow.out.contigs.collect { meta, fa -> file(fa).name },
+                workflow.out.versions
+            ).match()
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 2 — skip kraken2 (pass reads directly to Dragonflye)
+    // -------------------------------------------------------------------------
+    test("sarscov2 nanopore - skip kraken2") {
+
+        when {
+            params {
+                skip_kraken2        = true
+                skip_assembly_quast = false
+                skip_assembly       = false
+                assembly_args       = '--assembler miniasm --gsize 30000'
+            }
+            workflow {
+                """
+                input[0] = Channel.of([
+                    [ id:'test_sample', single_end:true ],
+                    file('${NANOPORE_FASTQ}', checkIfExists: true)
+                ])
+                input[1] = []
+                input[2] = file('${GENOME_FASTA}', checkIfExists: true)
+                input[3] = Channel.of([ [:], [] ])
+                """
+            }
+        }
+
+        then {
+            assert workflow.success
+            assert workflow.out.contigs
+            assert workflow.out.versions
+
+            assert snapshot(
+                workflow.out.contigs.collect { meta, fa -> file(fa).name },
+                workflow.out.versions
+            ).match()
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 3 — skip QUAST (no QC step)
+    // -------------------------------------------------------------------------
+    test("sarscov2 nanopore - skip quast") {
+
+        when {
+            params {
+                skip_kraken2        = false
+                skip_assembly_quast = true
+                skip_assembly       = false
+                assembly_args       = '--assembler miniasm --gsize 30000'
+            }
+            workflow {
+                """
+                input[0] = Channel.of([
+                    [ id:'test_sample', single_end:true ],
+                    file('${NANOPORE_FASTQ}', checkIfExists: true)
+                ])
+                input[1] = file('${KRAKEN2_DB}', checkIfExists: true)
+                input[2] = file('${GENOME_FASTA}', checkIfExists: true)
+                input[3] = Channel.of([ [:], [] ])
+                """
+            }
+        }
+
+        then {
+            assert workflow.success
+            assert workflow.out.contigs
+            assert workflow.out.quast_results.ifEmpty([]).toList().get() == []
+
+            assert snapshot(
+                workflow.out.contigs.collect { meta, fa -> file(fa).name },
+                workflow.out.versions
+            ).match()
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 4 — stub run (fast CI / no real tool execution)
+    // -------------------------------------------------------------------------
+    test("sarscov2 nanopore - stub") {
+        options "-stub"
+        tag "stub"
+
+        when {
+            params {
+                skip_kraken2        = false
+                skip_assembly_quast = false
+                skip_assembly       = false
+                assembly_args       = '--assembler miniasm --gsize 30000'
+            }
+            workflow {
+                """
+                input[0] = Channel.of([
+                    [ id:'test_sample', single_end:true ],
+                    file('${NANOPORE_FASTQ}', checkIfExists: true)
+                ])
+                input[1] = file('${KRAKEN2_DB}', checkIfExists: true)
+                input[2] = file('${GENOME_FASTA}', checkIfExists: true)
+                input[3] = Channel.of([ [:], [] ])
+                """
+            }
+        }
+
+        then {
+            assert workflow.success
+            assert workflow.out.contigs
+            assert workflow.out.versions
+
+            assert snapshot(workflow.out).match()
+        }
+    }
+}

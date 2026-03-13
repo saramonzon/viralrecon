@@ -124,6 +124,7 @@ include { FASTQ_TRIM_FASTP_FASTQC } from '../subworkflows/local/fastq_trim_fastp
 include { SNPEFF_SNPSIFT          } from '../subworkflows/local/snpeff_snpsift'
 include { FILTER_BAM_SAMTOOLS     } from '../subworkflows/local/filter_bam_samtools'
 include { HIV_RESISTANCE          } from '../subworkflows/local/hiv_resitance_detection'
+include { ASSEMBLY_DRAGONFLYE     } from '../subworkflows/local/assembly_dragonflye/main'
 
 /*
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1217,6 +1218,20 @@ workflow VIRALRECON {
             )
             ch_multiqc_files = ch_multiqc_files.mix(QUAST.out.results.collect{it[1]}.ifEmpty([]))
             ch_versions      = ch_versions.mix(QUAST.out.versions)
+        }
+
+        //
+        // SUBWORKFLOW: De novo assembly with Dragonflye + host removal (Kraken2) + QC (QUAST)
+        //
+        if (!params.skip_assembly && 'dragonflye' in assemblers) {
+            ASSEMBLY_DRAGONFLYE (
+                ch_variants_fastq,
+                PREPARE_GENOME.out.kraken2_db,
+                PREPARE_GENOME.out.fasta,
+                ch_genome_gff ? PREPARE_GENOME.out.gff.map { [ [:], it ] } : [ [:], [] ]
+            )
+            ch_multiqc_files = ch_multiqc_files.mix(ASSEMBLY_DRAGONFLYE.out.multiqc_files.ifEmpty([]))
+            ch_versions      = ch_versions.mix(ASSEMBLY_DRAGONFLYE.out.versions)
         }
 
         //
